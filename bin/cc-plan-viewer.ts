@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import readline from 'node:readline';
 import { execSync } from 'node:child_process';
 
 // ─── Stable install location ───
@@ -28,20 +29,6 @@ function getPkgRoot(): string {
 // ─── Settings file resolution ───
 const DEFAULT_SETTINGS = path.join(os.homedir(), '.claude', 'settings.json');
 
-function resolveSettingsPath(): string {
-  // Check --config flag
-  const configIdx = process.argv.indexOf('--config');
-  if (configIdx !== -1 && process.argv[configIdx + 1]) {
-    const custom = path.resolve(process.argv[configIdx + 1]);
-    if (!fs.existsSync(path.dirname(custom))) {
-      console.error(`[cc-plan-viewer] Directory does not exist: ${path.dirname(custom)}`);
-      process.exit(1);
-    }
-    return custom;
-  }
-  return DEFAULT_SETTINGS;
-}
-
 function readSettings(settingsPath: string): Record<string, unknown> {
   try {
     return JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
@@ -54,6 +41,146 @@ function writeSettings(settingsPath: string, settings: Record<string, unknown>):
   const dir = path.dirname(settingsPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+}
+
+// ─── Multi-config detection ───
+function findAllClaudeSettings(): string[] {
+  const home = os.homedir();
+  const found = new Set<string>();
+
+  // Scan ~/.claude*/settings.json
+  try {
+    for (const name of fs.readdirSync(home)) {
+      if (!name.startsWith('.claude')) continue;
+      const candidate = path.join(home, name, 'settings.json');
+      if (fs.existsSync(candidate)) found.add(candidate);
+    }
+  } catch {}
+
+  // Include CLAUDE_CONFIG_DIR if set (may point outside ~/.claude*)
+  if (process.env.CLAUDE_CONFIG_DIR) {
+    const candidate = path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json');
+    if (fs.existsSync(candidate)) found.add(candidate);
+  }
+
+  return [...found].sort();
+}
+
+function tildePath(p: string): string {
+  return p.replace(os.homedir(), '~');
+}
+
+async function promptMultiSelect(
+  options: string[],
+  question: string,
+  activeConfigDir?: string,
+): Promise<number[]> {
+  // Non-interactive: fall back to CLAUDE_CONFIG_DIR or all
+  if (!process.stdin.isTTY) {
+    if (activeConfigDir) {
+      const match = options.findIndex(p => p.startsWith(activeConfigDir));
+      return match >= 0 ? [match] : [0];
+    }
+    return options.map((_, i) => i);
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  console.log('');
+  console.log(`[cc-plan-viewer] Found ${options.length} Claude config directories:`);
+  options.forEach((opt, i) => {
+    const active = activeConfigDir && opt.startsWith(activeConfigDir) ? ' (active)' : '';
+    console.log(`  ${i + 1}. ${tildePath(opt)}${active}`);
+  });
+  console.log('');
+
+  return new Promise((resolve) => {
+    rl.question(`${question} (comma-separated numbers, or "all"): `, (answer) => {
+      rl.close();
+      const trimmed = answer.trim().toLowerCase();
+      if (trimmed === 'all' || trimmed === '') {
+        resolve(options.map((_, i) => i));
+        return;
+      }
+      const indices = trimmed.split(',')
+        .map(s => parseInt(s.trim(), 10) - 1)
+        .filter(i => i >= 0 && i < options.length);
+      resolve(indices);
+    });
+  });
+}
+
+function addHookToSettings(settingsPath: string): void {
+  const settings = readSettings(settingsPath);
+  if (!settings.hooks || typeof settings.hooks !== 'object') {
+    settings.hooks = {};
+  }
+  const hooks = settings.hooks as Record<string, unknown[]>;
+  if (!Array.isArray(hooks.PostToolUse)) {
+    hooks.PostToolUse = [];
+  }
+
+  const hookCommand = getHookCommand();
+
+  // Remove any existing cc-plan-viewer hooks first (handles upgrades)
+  hooks.PostToolUse = hooks.PostToolUse.filter((entry: unknown) => {
+    if (typeof entry !== 'object' || entry === null) return true;
+    const e = entry as Record<string, unknown>;
+    if (!Array.isArray(e.hooks)) return true;
+    return !e.hooks.some((h: unknown) => {
+      if (typeof h !== 'object' || h === null) return false;
+      const cmd = (h as Record<string, unknown>).command;
+      return typeof cmd === 'string' && cmd.includes('plan-viewer-hook');
+    });
+  });
+
+  // Add fresh hook entry
+  hooks.PostToolUse.push({
+    matcher: 'Write|Edit',
+    hooks: [{ type: 'command', command: hookCommand }],
+  });
+
+  writeSettings(settingsPath, settings);
+}
+
+function removeHookFromSettings(settingsPath: string): boolean {
+  const settings = readSettings(settingsPath);
+  const hooks = settings.hooks as Record<string, unknown[]> | undefined;
+  if (!hooks?.PostToolUse || !Array.isArray(hooks.PostToolUse)) return false;
+
+  const before = hooks.PostToolUse.length;
+  hooks.PostToolUse = hooks.PostToolUse.filter((entry: unknown) => {
+    if (typeof entry !== 'object' || entry === null) return true;
+    const e = entry as Record<string, unknown>;
+    if (!Array.isArray(e.hooks)) return true;
+    return !e.hooks.some((h: unknown) => {
+      if (typeof h !== 'object' || h === null) return false;
+      const cmd = (h as Record<string, unknown>).command;
+      return typeof cmd === 'string' && cmd.includes('plan-viewer-hook');
+    });
+  });
+
+  if (hooks.PostToolUse.length < before) {
+    writeSettings(settingsPath, settings);
+    return true;
+  }
+  return false;
+}
+
+function settingsHasHook(settingsPath: string): boolean {
+  const settings = readSettings(settingsPath);
+  const hooks = settings.hooks as Record<string, unknown[]> | undefined;
+  if (!hooks?.PostToolUse || !Array.isArray(hooks.PostToolUse)) return false;
+  return hooks.PostToolUse.some((entry: unknown) => {
+    if (typeof entry !== 'object' || entry === null) return false;
+    const e = entry as Record<string, unknown>;
+    if (!Array.isArray(e.hooks)) return false;
+    return e.hooks.some((h: unknown) => {
+      if (typeof h !== 'object' || h === null) return false;
+      const cmd = (h as Record<string, unknown>).command;
+      return typeof cmd === 'string' && cmd.includes('plan-viewer-hook');
+    });
+  });
 }
 
 // ─── Copy files to stable location ───
@@ -114,65 +241,64 @@ function getHookCommand(): string {
   return `node "${INSTALLED_HOOK}"`;
 }
 
-function install(): void {
-  const settingsPath = resolveSettingsPath();
+async function install(): Promise<void> {
   console.log('[cc-plan-viewer] Installing...');
   console.log(`[cc-plan-viewer] Install dir: ${INSTALL_DIR}`);
-  console.log(`[cc-plan-viewer] Settings: ${settingsPath}`);
 
   // Copy files to stable location
   installFiles();
   console.log('[cc-plan-viewer] Files copied to ~/.cc-plan-viewer/');
-
-  // Patch the installed hook to know where the server is
-  // The hook uses __dirname to find the server — now it's in ~/.cc-plan-viewer/
-  // and the server is at ~/.cc-plan-viewer/server/server/index.js
-  // Hook already resolves path.join(__dirname, '..', 'dist', 'server', 'server', 'index.js')
-  // but now it should look at path.join(__dirname, '..', 'server', 'server', 'index.js')
-  // Let's patch the hook to check both locations
   patchHookPaths();
 
-  // Add hook to settings
-  const settings = readSettings(settingsPath);
-  if (!settings.hooks || typeof settings.hooks !== 'object') {
-    settings.hooks = {};
+  // Determine which settings files to update
+  const configIdx = process.argv.indexOf('--config');
+  if (configIdx !== -1 && process.argv[configIdx + 1]) {
+    // Explicit --config flag: use exactly that path
+    const settingsPath = path.resolve(process.argv[configIdx + 1]);
+    if (!fs.existsSync(path.dirname(settingsPath))) {
+      console.error(`[cc-plan-viewer] Directory does not exist: ${path.dirname(settingsPath)}`);
+      process.exit(1);
+    }
+    addHookToSettings(settingsPath);
+    console.log(`[cc-plan-viewer] Hook added to ${tildePath(settingsPath)}`);
+  } else {
+    const allSettings = findAllClaudeSettings();
+
+    if (allSettings.length === 0) {
+      // No existing configs — create default
+      addHookToSettings(DEFAULT_SETTINGS);
+      console.log(`[cc-plan-viewer] Hook added to ${tildePath(DEFAULT_SETTINGS)}`);
+    } else if (allSettings.length === 1) {
+      // Single config — use it directly
+      addHookToSettings(allSettings[0]);
+      console.log(`[cc-plan-viewer] Hook added to ${tildePath(allSettings[0])}`);
+    } else {
+      // Multiple configs — prompt user
+      const selected = await promptMultiSelect(
+        allSettings,
+        'Install hook in which configs?',
+        process.env.CLAUDE_CONFIG_DIR,
+      );
+
+      if (selected.length === 0) {
+        console.log('[cc-plan-viewer] No configs selected. Hook not installed.');
+        return;
+      }
+
+      for (const idx of selected) {
+        addHookToSettings(allSettings[idx]);
+        console.log(`[cc-plan-viewer] Hook added to ${tildePath(allSettings[idx])}`);
+      }
+    }
   }
-  const hooks = settings.hooks as Record<string, unknown[]>;
-  if (!Array.isArray(hooks.PostToolUse)) {
-    hooks.PostToolUse = [];
-  }
 
-  const hookCommand = getHookCommand();
-
-  // Remove any existing cc-plan-viewer hooks first (handles upgrades)
-  hooks.PostToolUse = hooks.PostToolUse.filter((entry: unknown) => {
-    if (typeof entry !== 'object' || entry === null) return true;
-    const e = entry as Record<string, unknown>;
-    if (!Array.isArray(e.hooks)) return true;
-    return !e.hooks.some((h: unknown) => {
-      if (typeof h !== 'object' || h === null) return false;
-      const cmd = (h as Record<string, unknown>).command;
-      return typeof cmd === 'string' && cmd.includes('plan-viewer-hook');
-    });
-  });
-
-  // Add fresh hook entry
-  hooks.PostToolUse.push({
-    matcher: 'Write|Edit',
-    hooks: [{ type: 'command', command: hookCommand }],
-  });
-
-  writeSettings(settingsPath, settings);
-
+  console.log('');
   console.log('[cc-plan-viewer] Hook installed successfully.');
   console.log('');
   console.log('  Next time Claude Code writes a plan, the viewer will open in your browser.');
   console.log('');
   console.log('  Update anytime:   npx cc-plan-viewer@latest update');
   console.log('  Uninstall:        npx cc-plan-viewer uninstall');
-  if (settingsPath !== DEFAULT_SETTINGS) {
-    console.log(`  Custom config:    ${settingsPath}`);
-  }
 }
 
 function patchHookPaths(): void {
@@ -227,28 +353,34 @@ function update(): void {
   console.log('[cc-plan-viewer] Files updated in ~/.cc-plan-viewer/');
 }
 
-function uninstall(): void {
-  const settingsPath = resolveSettingsPath();
+async function uninstall(): Promise<void> {
   console.log('[cc-plan-viewer] Uninstalling...');
 
-  // Remove hook from settings
-  const settings = readSettings(settingsPath);
-  const hooks = settings.hooks as Record<string, unknown[]> | undefined;
-  if (hooks?.PostToolUse && Array.isArray(hooks.PostToolUse)) {
-    const before = hooks.PostToolUse.length;
-    hooks.PostToolUse = hooks.PostToolUse.filter((entry: unknown) => {
-      if (typeof entry !== 'object' || entry === null) return true;
-      const e = entry as Record<string, unknown>;
-      if (!Array.isArray(e.hooks)) return true;
-      return !e.hooks.some((h: unknown) => {
-        if (typeof h !== 'object' || h === null) return false;
-        const cmd = (h as Record<string, unknown>).command;
-        return typeof cmd === 'string' && cmd.includes('plan-viewer-hook');
-      });
-    });
-    if (hooks.PostToolUse.length < before) {
-      writeSettings(settingsPath, settings);
-      console.log(`[cc-plan-viewer] Hook removed from ${settingsPath}`);
+  // Determine which settings files to clean up
+  const configIdx = process.argv.indexOf('--config');
+  if (configIdx !== -1 && process.argv[configIdx + 1]) {
+    const settingsPath = path.resolve(process.argv[configIdx + 1]);
+    if (removeHookFromSettings(settingsPath)) {
+      console.log(`[cc-plan-viewer] Hook removed from ${tildePath(settingsPath)}`);
+    }
+  } else {
+    const allSettings = findAllClaudeSettings();
+    const withHook = allSettings.filter(settingsHasHook);
+
+    if (withHook.length === 0) {
+      console.log('[cc-plan-viewer] No hooks found in any Claude config.');
+    } else if (withHook.length === 1) {
+      removeHookFromSettings(withHook[0]);
+      console.log(`[cc-plan-viewer] Hook removed from ${tildePath(withHook[0])}`);
+    } else {
+      const selected = await promptMultiSelect(
+        withHook,
+        'Remove hook from which configs?',
+      );
+      for (const idx of selected) {
+        removeHookFromSettings(withHook[idx]);
+        console.log(`[cc-plan-viewer] Hook removed from ${tildePath(withHook[idx])}`);
+      }
     }
   }
 
@@ -297,13 +429,13 @@ function version(): void {
 const command = process.argv[2];
 switch (command) {
   case 'install':
-    install();
+    await install();
     break;
   case 'update':
     update();
     break;
   case 'uninstall':
-    uninstall();
+    await uninstall();
     break;
   case 'start':
     start();
@@ -319,11 +451,14 @@ switch (command) {
 cc-plan-viewer — Browser-based review UI for Claude Code plans
 
 Usage:
-  npx cc-plan-viewer install              Install hook + viewer files
-  npx cc-plan-viewer install --config <path>  Use custom settings.json path
-  npx cc-plan-viewer@latest update        Update to latest version
-  npx cc-plan-viewer uninstall            Remove hook + viewer files
-  npx cc-plan-viewer version              Show installed version
+  npx cc-plan-viewer install                  Install hook + viewer files
+  npx cc-plan-viewer install --config <path>  Use specific settings.json path
+  npx cc-plan-viewer@latest update            Update to latest version
+  npx cc-plan-viewer uninstall                Remove hook + viewer files
+  npx cc-plan-viewer version                  Show installed version
+
+When multiple Claude configs are detected (~/.claude*/settings.json),
+you'll be prompted to choose which ones to install the hook in.
 
 Files are installed to ~/.cc-plan-viewer/ so they persist across npm cache clears.
 `);
