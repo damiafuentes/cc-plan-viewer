@@ -12,7 +12,7 @@ const { execSync, spawn } = require('child_process');
 const SERVER_PORT = 3847;
 const PORT_FILE = path.join(os.tmpdir(), 'cc-plan-viewer-port');
 const DEBOUNCE_FILE = path.join(os.tmpdir(), 'cc-plan-viewer-opened.json');
-const DEBOUNCE_MS = 30000; // 30 seconds
+const DEBOUNCE_MS = 5000; // 5 seconds (prevents rapid re-opens during multi-chunk writes)
 
 // Plans directory candidates
 const PLANS_DIRS = [
@@ -20,11 +20,8 @@ const PLANS_DIRS = [
   path.join(os.homedir(), '.claude', 'plans'),
 ];
 
-function getPlansDir() {
-  for (const dir of PLANS_DIRS) {
-    if (fs.existsSync(dir)) return dir;
-  }
-  return null;
+function getAllPlansDirs() {
+  return PLANS_DIRS.filter(dir => fs.existsSync(dir));
 }
 
 function getServerPort() {
@@ -37,9 +34,8 @@ function getServerPort() {
 
 function isPlanFile(filePath) {
   if (!filePath || !filePath.endsWith('.md')) return false;
-  const plansDir = getPlansDir();
-  if (!plansDir) return false;
-  return path.dirname(filePath) === plansDir;
+  const dir = path.dirname(filePath);
+  return getAllPlansDirs().includes(dir);
 }
 
 function shouldOpenBrowser(filename) {
@@ -110,9 +106,10 @@ async function waitForServer(port, maxWaitMs = 3000) {
 }
 
 function checkUnconsumedReviews() {
-  const plansDir = getPlansDir();
-  if (!plansDir) return null;
+  const plansDirs = getAllPlansDirs();
+  if (plansDirs.length === 0) return null;
 
+  for (const plansDir of plansDirs) {
   const files = fs.readdirSync(plansDir).filter(f => f.endsWith('.review.json'));
   for (const file of files) {
     try {
@@ -146,6 +143,7 @@ function checkUnconsumedReviews() {
       }
     } catch {}
   }
+  } // end plansDirs loop
   return null;
 }
 
