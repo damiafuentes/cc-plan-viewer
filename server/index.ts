@@ -11,21 +11,21 @@ import { watchPlansDir } from './planWatcher.js';
 
 const PORT = parseInt(process.env.PORT || '3847', 10);
 
-// Auto-detect plans directory
-function findPlansDir(): string {
+// Auto-detect all ~/.claude*/plans/ directories
+function findAllPlansDirs(): string[] {
   const home = os.homedir();
-  const candidates = [
-    path.join(home, '.claude-personal', 'plans'),
-    path.join(home, '.claude', 'plans'),
-  ];
-  for (const dir of candidates) {
-    if (fs.existsSync(dir)) return dir;
+  try {
+    return fs.readdirSync(home)
+      .filter(name => name.startsWith('.claude'))
+      .map(name => path.join(home, name, 'plans'))
+      .filter(dir => fs.existsSync(dir));
+  } catch {
+    return [path.join(home, '.claude', 'plans')];
   }
-  // Default to first candidate even if it doesn't exist yet
-  return candidates[0];
 }
 
-const plansDir = findPlansDir();
+const plansDirs = findAllPlansDirs();
+const plansDir = plansDirs[0] || path.join(os.homedir(), '.claude', 'plans');
 const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
@@ -40,36 +40,46 @@ app.use((_req, _res, next) => {
 
 // Health check
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', plansDir });
+  res.json({ status: 'ok', plansDirs });
 });
 
-// List all plans
+// List all plans across all ~/.claude*/plans/ directories
 app.get('/api/plans', (_req, res) => {
   try {
-    if (!fs.existsSync(plansDir)) {
-      res.json([]);
-      return;
-    }
-    const files = fs.readdirSync(plansDir)
-      .filter(f => f.endsWith('.md') && !f.endsWith('.review.json'))
-      .map(f => {
-        const filePath = path.join(plansDir, f);
+    const allFiles: { filename: string; modified: string; size: number; hasReview: boolean; reviewAction: string | null; dir: string }[] = [];
+    for (const dir of plansDirs) {
+      if (!fs.existsSync(dir)) continue;
+      const files = fs.readdirSync(dir)
+        .filter(f => f.endsWith('.md') && !f.endsWith('.review.json'));
+      for (const f of files) {
+        const filePath = path.join(dir, f);
         const stat = fs.statSync(filePath);
         const review = getReview(filePath);
-        return {
+        allFiles.push({
           filename: f,
           modified: stat.mtime.toISOString(),
           size: stat.size,
           hasReview: !!review,
           reviewAction: review?.action ?? null,
-        };
-      })
-      .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
-    res.json(files);
+          dir,
+        });
+      }
+    }
+    allFiles.sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+    res.json(allFiles);
   } catch (err) {
     res.status(500).json({ error: 'Failed to list plans' });
   }
 });
+
+// Find a plan file across all plan directories
+function findPlanFile(filename: string): string | null {
+  for (const dir of plansDirs) {
+    const filePath = path.join(dir, filename);
+    if (fs.existsSync(filePath)) return filePath;
+  }
+  return null;
+}
 
 // Get a specific plan
 app.get('/api/plans/:filename', (req, res) => {
@@ -78,7 +88,11 @@ app.get('/api/plans/:filename', (req, res) => {
     res.status(400).json({ error: 'Invalid filename' });
     return;
   }
-  const filePath = path.join(plansDir, filename);
+  const filePath = findPlanFile(filename);
+  if (!filePath) {
+    res.status(404).json({ error: 'Plan not found' });
+    return;
+  }
   try {
     const content = fs.readFileSync(filePath, 'utf8');
     const parsed = parsePlan(content);
@@ -116,8 +130,8 @@ app.post('/api/reviews/:filename', (req, res) => {
     res.status(400).json({ error: 'Invalid filename' });
     return;
   }
-  const filePath = path.join(plansDir, filename);
-  if (!fs.existsSync(filePath)) {
+  const filePath = findPlanFile(filename);
+  if (!filePath) {
     res.status(404).json({ error: 'Plan not found' });
     return;
   }
@@ -151,7 +165,11 @@ app.post('/api/reviews/:filename', (req, res) => {
 // Get a review
 app.get('/api/reviews/:filename', (req, res) => {
   const filename = req.params.filename;
-  const filePath = path.join(plansDir, filename);
+  const filePath = findPlanFile(filename);
+  if (!filePath) {
+    res.status(404).json({ error: 'No review found' });
+    return;
+  }
   const review = getReview(filePath);
   if (!review) {
     res.status(404).json({ error: 'No review found' });
@@ -187,11 +205,11 @@ server.listen(PORT, () => {
   writePortFile(PORT);
   resetIdleTimer();
   console.log(`[cc-plan-viewer] Server running at http://localhost:${PORT}`);
-  console.log(`[cc-plan-viewer] Plans directory: ${plansDir}`);
+  console.log(`[cc-plan-viewer] Plans directories: ${plansDirs.join(', ')}`);
 });
 
-// Watch for plan file changes
-watchPlansDir(plansDir, (filename, content) => {
+// Watch all plan directories for changes
+const onPlanChange = (filename: string, content: string) => {
   const message = JSON.stringify({
     type: 'plan-updated',
     filename,
@@ -201,7 +219,10 @@ watchPlansDir(plansDir, (filename, content) => {
       client.send(message);
     }
   }
-});
+};
+for (const dir of plansDirs) {
+  watchPlansDir(dir, onPlanChange);
+}
 
 // Cleanup on exit
 process.on('SIGINT', () => { cleanupFiles(); process.exit(0); });

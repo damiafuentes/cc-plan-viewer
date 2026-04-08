@@ -14,14 +14,17 @@ const PORT_FILE = path.join(os.tmpdir(), 'cc-plan-viewer-port');
 const DEBOUNCE_FILE = path.join(os.tmpdir(), 'cc-plan-viewer-opened.json');
 const DEBOUNCE_MS = 5000; // 5 seconds (prevents rapid re-opens during multi-chunk writes)
 
-// Plans directory candidates
-const PLANS_DIRS = [
-  path.join(os.homedir(), '.claude-personal', 'plans'),
-  path.join(os.homedir(), '.claude', 'plans'),
-];
-
+// Dynamically find all ~/.claude*/plans/ directories
 function getAllPlansDirs() {
-  return PLANS_DIRS.filter(dir => fs.existsSync(dir));
+  const home = os.homedir();
+  try {
+    return fs.readdirSync(home)
+      .filter(name => name.startsWith('.claude'))
+      .map(name => path.join(home, name, 'plans'))
+      .filter(dir => fs.existsSync(dir));
+  } catch {
+    return [];
+  }
 }
 
 function getServerPort() {
@@ -34,8 +37,10 @@ function getServerPort() {
 
 function isPlanFile(filePath) {
   if (!filePath || !filePath.endsWith('.md')) return false;
-  const dir = path.dirname(filePath);
-  return getAllPlansDirs().includes(dir);
+  // Match any ~/.claude*/plans/*.md
+  const home = os.homedir();
+  const rel = path.relative(home, filePath);
+  return /^\.claude[^/]*\/plans\/[^/]+\.md$/.test(rel);
 }
 
 function shouldOpenBrowser(filename) {
