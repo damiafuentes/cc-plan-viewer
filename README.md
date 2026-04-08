@@ -1,4 +1,4 @@
-# cc-plan-viewer
+# Claude Code Plan Viewer
 
 A browser-based review UI for Claude Code plans. When Claude Code enters plan mode, a browser tab opens automatically showing the plan with proper markdown rendering, syntax highlighting, and inline commenting.
 
