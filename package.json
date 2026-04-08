@@ -4,7 +4,7 @@
   "description": "Browser-based PR-style review UI for Claude Code plans",
   "type": "module",
   "bin": {
-    "cc-plan-viewer": "./dist/server/bin/cc-plan-viewer.js"
+    "cc-plan-viewer": "./dist/cli-bundle.mjs"
   },
   "files": [
     "dist/",
@@ -14,12 +14,19 @@
   ],
   "scripts": {
     "dev": "concurrently \"tsx watch server/index.ts\" \"vite\"",
-    "build": "vite build && tsc -p tsconfig.server.json",
-    "start": "node dist/server/server/index.js",
-    "install-hook": "node dist/server/bin/cc-plan-viewer.js install",
+    "build": "vite build && tsc -p tsconfig.server.json && npm run bundle:server",
+    "bundle:server": "esbuild dist/server/server/index.js --bundle --platform=node --format=esm --outfile=dist/server-bundle.mjs --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\" && esbuild dist/server/bin/cc-plan-viewer.js --bundle --platform=node --format=esm --outfile=dist/cli-bundle.mjs --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\"",
+    "start": "node dist/server-bundle.mjs",
+    "install-hook": "node dist/cli-bundle.mjs install",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["claude", "claude-code", "plan", "review", "viewer"],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "plan",
+    "review",
+    "viewer"
+  ],
   "license": "MIT",
   "author": "Damià Fuentes Escoté",
   "repository": {
@@ -36,12 +43,13 @@
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
-    "@types/ws": "^8.5.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.5.0",
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.0",
     "concurrently": "^9.0.0",
+    "esbuild": "^0.28.0",
     "postcss": "^8.4.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

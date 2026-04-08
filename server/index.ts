@@ -161,9 +161,10 @@ app.get('/api/reviews/:filename', (req, res) => {
 });
 
 // Serve SPA static files
-// Try multiple paths: dist/client relative to project root, or relative to compiled output
+// Try multiple paths depending on how the server is running
 const clientDistCandidates = [
-  path.join(import.meta.dirname, '..', '..', 'client'),    // prod: dist/server/server/ → dist/client/
+  path.join(import.meta.dirname, 'client'),                 // bundled: ~/.cc-plan-viewer/server-bundle.mjs → ~/.cc-plan-viewer/client/
+  path.join(import.meta.dirname, '..', '..', 'client'),    // compiled: dist/server/server/ → dist/client/
   path.join(import.meta.dirname, '..', 'dist', 'client'),  // dev: server/ → dist/client/
 ];
 const clientDist = clientDistCandidates.find((d) => fs.existsSync(d));
