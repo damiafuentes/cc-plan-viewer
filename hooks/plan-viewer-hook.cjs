@@ -14,17 +14,21 @@ const PORT_FILE = path.join(os.tmpdir(), 'cc-plan-viewer-port');
 const DEBOUNCE_FILE = path.join(os.tmpdir(), 'cc-plan-viewer-opened.json');
 const DEBOUNCE_MS = 5000; // 5 seconds (prevents rapid re-opens during multi-chunk writes)
 
-// Dynamically find all ~/.claude*/plans/ directories
+// Dynamically find all plans directories (home-level + project-level)
 function getAllPlansDirs() {
+  const dirs = [];
   const home = os.homedir();
   try {
-    return fs.readdirSync(home)
+    fs.readdirSync(home)
       .filter(name => name.startsWith('.claude'))
       .map(name => path.join(home, name, 'plans'))
-      .filter(dir => fs.existsSync(dir));
-  } catch {
-    return [];
-  }
+      .filter(dir => fs.existsSync(dir))
+      .forEach(dir => dirs.push(dir));
+  } catch {}
+  // Project-level: {cwd}/.claude/plans/
+  const projectDir = path.join(process.cwd(), '.claude', 'plans');
+  if (fs.existsSync(projectDir)) dirs.push(projectDir);
+  return dirs;
 }
 
 function getServerPort() {
@@ -37,10 +41,12 @@ function getServerPort() {
 
 function isPlanFile(filePath) {
   if (!filePath || !filePath.endsWith('.md')) return false;
-  // Match any ~/.claude*/plans/*.md
+  // Home-level: ~/.claude*/plans/*.md
   const home = os.homedir();
   const rel = path.relative(home, filePath);
-  return /^\.claude[^/]*\/plans\/[^/]+\.md$/.test(rel);
+  if (/^\.claude[^/]*\/plans\/[^/]+\.md$/.test(rel)) return true;
+  // Project-level: */.claude/plans/*.md
+  return /\/\.claude\/plans\/[^/]+\.md$/.test(filePath);
 }
 
 function shouldOpenBrowser(filename) {

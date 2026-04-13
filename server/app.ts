@@ -7,7 +7,8 @@ import { parsePlan } from './planParser.js';
 import { saveReview, getReview, type PlanReview } from './reviewStore.js';
 import { resetIdleTimer } from './lifecycle.js';
 
-export function createApp(plansDirs: string[]) {
+export function createApp(initialPlansDirs: string[]) {
+  const plansDirs = [...initialPlansDirs];
   const plansDir = plansDirs[0] || '';
   const app = express();
   const server = createServer(app);
@@ -90,6 +91,12 @@ export function createApp(plansDirs: string[]) {
   app.post('/api/plan-updated', (req, res) => {
     const { filePath, planOptions } = req.body;
     const filename = path.basename(filePath || '');
+
+    // Dynamically register new plan directories (e.g., project-level .claude/plans/)
+    const dir = path.dirname(filePath || '');
+    if (dir && !plansDirs.includes(dir) && fs.existsSync(dir)) {
+      plansDirs.push(dir);
+    }
 
     // Broadcast to all WebSocket clients
     const message = JSON.stringify({
